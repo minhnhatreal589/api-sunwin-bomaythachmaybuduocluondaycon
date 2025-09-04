@@ -334,10 +334,15 @@ def predict_vip():
             logger.info(f"Đã thêm phiên mới: {latest_data['Phien']}")
     except requests.RequestException as e:
         logger.error(f"Lỗi API nguồn: {str(e)}")
-        return jsonify({"error": f"Lỗi API nguồn: {str(e)}"}), 500
+        # Nếu API nguồn lỗi, trả về thông báo lỗi thay vì dự đoán mặc định
+        return jsonify({
+            "error": f"Lỗi không thể kết nối tới API nguồn: {str(e)}",
+            "message": "Không có dữ liệu để phân tích. Vui lòng kiểm tra lại API nguồn."
+        }), 500
 
-    if len(historical_data) < 10:
-        return jsonify({"current_session": 0, "next_session": 1, "du_doan": "Tài", "confidence": "50%", "meta": "Chưa đủ dữ liệu, mặc định Tài.", "id": "Tele@HoVanThien_Pro"}), 200
+    # --- BỎ ĐIỀU KIỆN KIỂM TRA < 10 PHIÊN ---
+    # Giờ đây, logic sẽ chạy với bất kỳ lượng dữ liệu nào có sẵn.
+    # Nếu có 0 dữ liệu, nó sẽ tự trả về lỗi ở bước trên.
 
     recent_sessions = historical_data[-200:]
     recent_pattern = "".join(['T' if s['Ket_qua'] == 'Tài' else 'X' for s in recent_sessions])
@@ -346,13 +351,11 @@ def predict_vip():
     features = feature_engineering(recent_sessions, recent_pattern)
 
     # BƯỚC 2: CẤU HÌNH ENSEMBLE MODEL THÔNG MINH
+    # Các model vẫn giữ nguyên, chúng sẽ tự bỏ qua nếu không đủ dữ liệu
     models_config = [
-        # --- Model AI Nâng cao có trọng số cao nhất ---
         {"name": "🤖 AI Meta-Model Synthesis", "func": model_feature_synthesis, "weight": 2.5, "args": (recent_pattern, features)},
         {"name": "🔍 Entropy & Chaos Analysis", "func": model_entropy_based, "weight": 1.8, "args": (recent_pattern, features)},
         {"name": "🧱 Block Pattern Detection", "func": model_block_pattern, "weight": 1.7, "args": (recent_pattern,)},
-
-        # --- Các model thống kê và quy tắc cơ bản ---
         {"name": "Bệt/1-1", "func": model_1_bet_va_1_1, "weight": 1.5, "args": (recent_pattern,)},
         {"name": "Nhịp 1-2/2-1/2-2", "func": model_2_cau_nhip, "weight": 1.5, "args": (recent_pattern,)},
         {"name": "Markov Chain", "func": model_markov, "weight": 1.4, "args": (recent_pattern,)},
@@ -368,6 +371,8 @@ def predict_vip():
 
     for config in models_config:
         try:
+            # Các model tự có điều kiện check số phiên bên trong
+            # Nếu không đủ dữ liệu, chúng sẽ trả về (None, 0.0, ...) và không ảnh hưởng đến kết quả
             pred, conf, reason = config["func"](*config["args"])
             if pred:
                 score = config["weight"] * conf
@@ -379,22 +384,28 @@ def predict_vip():
             continue
     
     # BƯỚC 3: RA QUYẾT ĐỊNH CUỐI CÙNG
-    final_pred = "Tài" if score_tai >= score_xiu else "Xỉu"
-    total_score = score_tai + score_xiu
-    conf_val = 50 + (abs(score_tai - score_xiu) / total_score * 50) if total_score > 0 else 50
-    conf_str = f"{min(98, int(conf_val))}%"
+    # Nếu không có model nào đưa ra dự đoán (vì quá ít dữ liệu), hệ thống sẽ nghiêng về Tài 50%
+    if score_tai == 0 and score_xiu == 0:
+        final_pred = "Tài"
+        conf_str = "50%"
+        meta = "Không đủ dữ liệu cho bất kỳ mô hình nào, dự đoán ngẫu nhiên."
+        strongest_reason = "Chưa có đủ lịch sử phiên để hình thành một quy luật rõ ràng."
+    else:
+        final_pred = "Tài" if score_tai >= score_xiu else "Xỉu"
+        total_score = score_tai + score_xiu
+        conf_val = 50 + (abs(score_tai - score_xiu) / total_score * 50) if total_score > 0 else 50
+        conf_str = f"{min(98, int(conf_val))}%"
 
-    meta = ""
-    # Tìm lý do từ model có trọng số cao nhất đã đưa ra dự đoán
-    strongest_reason = "Tổng hợp nhiều tín hiệu."
-    for detail in model_details:
-        if detail['pred'] == final_pred and any(cfg['name'] == detail['model'] and cfg['weight'] > 1.5 for cfg in models_config):
-            strongest_reason = detail['reason']
-            meta = f"Tín hiệu mạnh từ {detail['model']}."
-            break
+        meta = ""
+        strongest_reason = "Tổng hợp nhiều tín hiệu."
+        # Tìm lý do từ model có trọng số cao nhất
+        for detail in model_details:
+            if detail['pred'] == final_pred and any(cfg['name'] == detail['model'] and cfg['weight'] > 1.5 for cfg in models_config):
+                strongest_reason = detail['reason']
+                meta = f"Tín hiệu mạnh từ {detail['model']}."
+                break
     
     last_session = historical_data[-1]
-    # ... (phần cập nhật lịch sử dự đoán giữ nguyên)
 
     response = {
         "current_session": last_session['Phien'],
@@ -405,9 +416,9 @@ def predict_vip():
         "du_doan": final_pred,
         "confidence": conf_str,
         "meta": meta,
-        "reasoning": strongest_reason, # Thêm trường giải thích rõ hơn
+        "reasoning": strongest_reason,
         "models": model_details,
-        "features": {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in features.items() if v is not None}, # Gửi kèm features đã tính
+        "features": {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in features.items() if v is not None},
         "id": "Tele@HoVanThien_Pro"
     }
     return jsonify(response)
@@ -418,7 +429,7 @@ def history_predict():
     return jsonify({
         "history": prediction_history,
         "total": len(prediction_history),
-        "id": "@ Văn Nhật Trở Lại"
+        "id": "Tele@HoVanThien_Pro"
     })
 
 @app.route('/health', methods=['GET'])
